@@ -615,6 +615,9 @@ bool CPUStats::GetCpuFile() {
         } else if (name == "apm_xgene") {
             find_input(path, "temp", input, "SoC Temperature");
             break;
+        } else if (name == "bigcore0_thermal") {
+            find_fallback_input(path, "temp1", input);
+            break;
         } else {
             path.clear();
         }
