@@ -1,4 +1,5 @@
 #define VKROOTS_LAYER_IMPLEMENTATION
+#include <cstdio>
 #include <memory>
 #include <unordered_map>
 
@@ -6,10 +7,9 @@
 #include "mesa/os_time.h"
 #include "fps_limiter.h"
 #include "layer.h"
+#include "file_utils.h"
 
-std::string pEngineName;
-uint32_t renderMinor = 0;
-PFN_vkSetDeviceLoaderData g_set_device_loader_data = nullptr;
+static char pendingEngineName[VK_MAX_DESCRIPTION_SIZE]{};
 std::unique_ptr<fpsLimiter> fps_limiter;
 std::unique_ptr<presentLimiter> present_limiter;
 std::unique_ptr<Layer> layer;
@@ -28,6 +28,23 @@ static bool ChainHasSType(const void* head, VkStructureType sType) {
         }
     }
     return false;
+}
+
+static PFN_vkSetDeviceLoaderData FindSetDeviceLoaderData(const VkDeviceCreateInfo* pCreateInfo)
+{
+    if (!pCreateInfo)
+        return nullptr;
+
+    for (auto* it = reinterpret_cast<const VkBaseInStructure*>(pCreateInfo->pNext); it; it = it->pNext) {
+        if (it->sType != VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO)
+            continue;
+
+        auto* layer_info = reinterpret_cast<const VkLayerDeviceCreateInfo*>(it);
+        if (layer_info->function == VK_LOADER_DATA_CALLBACK)
+            return layer_info->u.pfnSetDeviceLoaderData;
+    }
+
+    return nullptr;
 }
 
 class VkInstanceOverrides {
@@ -70,26 +87,10 @@ public:
         ci.enabledExtensionCount = (uint32_t)exts.size();
         ci.ppEnabledExtensionNames = exts.data();
 
-        const VkLayerDeviceCreateInfo* layer_info =
-            (const VkLayerDeviceCreateInfo*)pCreateInfo->pNext;
+        Layer::set_device_loader_data.store(FindSetDeviceLoaderData(pCreateInfo), std::memory_order_release);
 
-        while (layer_info) {
-            if (layer_info->sType == VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO &&
-                layer_info->function == VK_LOADER_DATA_CALLBACK) {
-                g_set_device_loader_data = layer_info->u.pfnSetDeviceLoaderData;
-                break;
-            }
-
-            layer_info = (const VkLayerDeviceCreateInfo*)layer_info->pNext;
-        }
-
-        if (!g_set_device_loader_data) {
-            fprintf(stderr, "failed to get device loader data\n");
-            fprintf(stderr, "we will get validation errors\n");
-        }
-
-        if (!layer) layer = std::make_unique<Layer>();
-        layer->loader_data = g_set_device_loader_data;
+        if (!Layer::set_device_loader_data.load(std::memory_order_acquire))
+            SPDLOG_ERROR("Failed to get vkSetDeviceLoaderData callback; layer-created dispatchable objects will not be tagged");
 
         VkPhysicalDevicePresentIdFeaturesKHR pid{};
         pid.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
@@ -125,7 +126,7 @@ public:
         if (pCreateInfo && pCreateInfo->pApplicationInfo && pCreateInfo->pApplicationInfo->pEngineName)
             engine = pCreateInfo->pApplicationInfo->pEngineName;
 
-        pEngineName = engine;
+        std::snprintf(pendingEngineName, sizeof(pendingEngineName), "%s", engine);
 
         std::vector<const char*> exts;
         exts.reserve((pCreateInfo ? pCreateInfo->enabledExtensionCount : 0) + 8);
@@ -184,10 +185,16 @@ public:
             return (r == VK_SUCCESS) ? VK_ERROR_INITIALIZATION_FAILED : r;
         }
 
-        if (!renderMinor) {
+        if (!layer) layer = std::make_unique<Layer>();
+        layer->ipc->pEngineName = pendingEngineName;
+
+        if (!layer->ipc->renderMinor || layer->ipc->vulkanDriver.empty()) {
             VkPhysicalDeviceDrmPropertiesEXT drm_props{};
             drm_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT;
-            drm_props.pNext = nullptr;
+
+            VkPhysicalDeviceDriverProperties driver_props{};
+            driver_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+            drm_props.pNext = &driver_props;
 
             VkPhysicalDeviceProperties2KHR props2{};
             props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
@@ -200,12 +207,16 @@ public:
 
             fpGetPhysicalDeviceProperties2KHR(pDispatch->PhysicalDevice, &props2);
             if (drm_props.hasPrimary)
-                renderMinor = drm_props.renderMinor;
+                layer->ipc->renderMinor = drm_props.renderMinor;
+            if (driver_props.driverInfo[0] != '\0')
+                layer->ipc->vulkanDriver = driver_props.driverInfo;
+            if (props2.properties.deviceName[0] != '\0')
+                layer->ipc->gpuName = clean_gpu_name(props2.properties.deviceName);
         }
 
-        if (!layer) layer = std::make_unique<Layer>();
         layer->init_overlay_resources(pCreateInfo, pDispatch, count);
         layer->create_swapchain_data(pSwapchain, pCreateInfo, pDispatch);
+        layer->ipc->send_resolution(pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.height);
 
         layer->g_vkSetDebugUtilsObjectNameEXT =
         reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
@@ -234,7 +245,9 @@ public:
         VkQueue queue,
         const VkPresentInfoKHR* pPresentInfo)
     {
-        layer->init_cmd(queue);
+        if (!layer->init_cmd(queue))
+            return pDispatch->QueuePresentKHR(queue, pPresentInfo);
+
         uint32_t swapchain_image_count = 0;
         pDispatch->GetSwapchainImagesKHR(pDispatch->Device, pPresentInfo->pSwapchains[0], &swapchain_image_count, nullptr);
         uint32_t imageIndex = pPresentInfo->pImageIndices[0];
@@ -270,12 +283,14 @@ public:
         // TODO Probably don't do this every frame
         fps_limiter->set_fps_limit(layer->ipc->fps_limit);
 
-        layer->ipc->start(renderMinor, pEngineName, swapchain_image_count);
+        layer->ipc->start(swapchain_image_count);
+        bool drew;
         {
             std::lock_guard lock(layer->overlay_vk->m);
-            if (!layer->overlay_vk->draw(pPresentInfo->pSwapchains[0], imageIndex, queue, pi))
-                return pDispatch->QueuePresentKHR(queue, pPresentInfo);
+            drew = layer->overlay_vk->draw(pPresentInfo->pSwapchains[0], imageIndex, queue, pi);
         }
+        if (!drew)
+            return pDispatch->QueuePresentKHR(queue, pPresentInfo);
 
         if (!present_limiter)
             present_limiter = std::make_unique<presentLimiter>(pDispatch->WaitForPresentKHR);
@@ -303,17 +318,17 @@ public:
             ids_ptr = tl_ids.data();
         }
 
-        VkResult r;
-
+        VkSemaphore signal;
         {
             std::lock_guard lock(layer->overlay_vk->m);
-            VkPresentInfoKHR pi2 = *pPresentInfo;
-            VkSemaphore signal = layer->ovl_res->overlay_done[imageIndex];
-            pi2.waitSemaphoreCount = 1;
-            pi2.pWaitSemaphores = &signal;
-
-            r = pDispatch->QueuePresentKHR(queue, &pi2);
+            signal = layer->ovl_res->overlay_done[imageIndex];
         }
+
+        VkPresentInfoKHR pi2 = *pPresentInfo;
+        pi2.waitSemaphoreCount = 1;
+        pi2.pWaitSemaphores = &signal;
+
+        VkResult r = pDispatch->QueuePresentKHR(queue, &pi2);
 
         if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
             if (ids_ptr)
@@ -356,9 +371,13 @@ public:
     }
 
     static void DestroyDevice(const vkroots::VkDeviceDispatch* d, VkDevice device, const VkAllocationCallbacks* pAllocator) {
+        // Keep the global layer alive when unrelated temporary devices are destroyed.
+        const bool destroy_layer = layer && layer->ovl_res && layer->ovl_res->d && layer->ovl_res->d->Device == device;
         d->DeviceWaitIdle(device);
-        if (layer) layer.reset();
-        fps_limiter.reset();
+        if (destroy_layer) {
+            layer.reset();
+            fps_limiter.reset();
+        }
 
         d->DestroyDevice(device, pAllocator);
     }
@@ -372,19 +391,23 @@ public:
         auto& q_limiter = fps_limiter->q_limiter;
         if (q_limiter->is_present_queue(queue))
             q_limiter->throttle_before_submit(d);
-        {
-            std::lock_guard lock(layer->overlay_vk->m);
-            d->QueueSubmit(queue, submitCount, pSubmits, fence);
+
+        VkResult r = d->QueueSubmit(queue, submitCount, pSubmits, fence);
+
+        if (r != VK_SUCCESS) {
+            SPDLOG_ERROR("QueueSubmit {}", string_VkResult(r));
+            return r;
         }
 
         if (q_limiter->is_present_queue(queue)) {
-            std::lock_guard lock(layer->overlay_vk->m);
             VkResult r2 = q_limiter->mark_after_submit(d, queue);
-            if (r2 != VK_SUCCESS)
+            if (r2 != VK_SUCCESS) {
+                SPDLOG_ERROR("QueueSubmit limiter mark_after_submit {}", string_VkResult(r2));
                 return r2;
+            }
         }
 
-        return VK_SUCCESS;
+        return r;
     }
 
     static VkResult AcquireNextImageKHR(const vkroots::VkDeviceDispatch* pDispatch,

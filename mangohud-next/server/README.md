@@ -16,19 +16,25 @@ If the file does not exist, or if the HUD table is invalid, MangoHud Next falls 
 
 ## Configuration Format
 
-The config file is YAML with two top-level sections:
+The config file is YAML. `options` is optional. A layout can be defined as `hud.windows`, or as `hud_table` for a single default window.
 
 ```yaml
 options:
   font_size: 24
   fps_limit: 0.0
 
-hud_table:
-  rows:
-    - [ {text: GPU}, {value: [GPU, 0, LOAD]} ]
+hud:
+  windows:
+    - position: [10, 10]
+      padding: 8
+      background: true
+      table:
+        col_gap: 8
+        rows:
+          - [ {text: GPU}, {value: [GPU, 0, LOAD]} ]
 ```
 
-`options` is optional. `hud_table.rows` is required when a config file exists.
+`hud_table.rows` is required when using the single-window form. `hud.windows[].table.rows` is required when using the window form.
 
 The config file is watched while MangoHud Next is running. Changes are reloaded automatically when the file timestamp or size changes.
 
@@ -39,20 +45,41 @@ The config file is watched while MangoHud Next is running. Changes are reloaded 
 | `font_size` | integer | `24` | HUD font size. Currently parsed by the config system for renderer use. |
 | `fps_limit` | number | `0` | FPS limit sent to connected clients. `0` disables the limiter. |
 
-## HUD Table
+## Hud Windows
 
-`hud_table.rows` is a list of rows. Each row is a YAML list of cells. A cell can be `null` or one of these maps:
+Each entry in `hud.windows` defines one hud window.
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `position` | `[x, y]` | `[10, 10]` | Window position in pixels. |
+| `padding` | number | `8` | Padding around the table content. |
+| `background` | boolean | `true` | Draw the window background. |
+| `table` | map | required | Table layout for this window. |
+
+## Hud Table
+
+`hud_table` and each window `table` support these table options:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `col_gap` | number | `8` | Horizontal spacing between columns. |
+| `row_gap` | number | `-2` | Vertical spacing between rows. Negative values tighten rows. |
+| `debug_cell_boxes` | boolean | `false` | Draw debug outlines for table cells. |
+
+`rows` is a list of rows. Each row is a YAML list of cells. A cell can be `null` or one of these maps:
 
 | Cell | Required field | Optional fields | Description |
 | --- | --- | --- | --- |
-| Text | `text` | `color`, `font_size`, `font_scale` | Static text. |
-| Value | `value` | `unit`, `color`, `precision`, `font_size`, `font_scale` | Metric value. If `unit` is omitted, the metric's default unit is used. Float values use one decimal by default. |
+| Text | `text` | `color`, `font_size`, `font_scale`, `truncate` | Static text. |
+| Value | `value` | `unit`, `color`, `precision`, `font_size`, `font_scale`, `truncate` | Metric value. If `unit` is omitted, the metric's default unit is used. Float values use one decimal by default. |
 | Graph | `graph` | none currently used | Graph data. Currently only supports `FRAMETIMES`. |
-| Exec | `exec` | `unit`, `color`, `font_size`, `font_scale` | Output of a shell command. |
+| Exec | `exec` | `unit`, `color`, `font_size`, `font_scale`, `truncate` | Output of a shell command. |
 
 Color values are `RRGGBB` or `RRGGBBAA` hex strings, with an optional leading `#`. When `color` is omitted, the default is white.
 
 `font_size` sets an exact size for a cell. `font_scale` scales the HUD default font size for that cell. If both are set, `font_size` is used.
+
+`truncate` limits displayed text to a maximum character count. Truncated text ends with `...` when there is room.
 
 ## Metric References
 
@@ -73,7 +100,26 @@ Available metrics currently include:
 | `[GPU, index, KEY]` | `LOAD`, `VRAM_USED`, `GTT_USED`, `VRAM_TOTAL`, `VRAM_CLOCK`, `VRAM_TEMP`, `TEMP`, `JUNCTION_TEMP`, `CORE_CLOCK`, `VOLTAGE`, `POWER`, `POWER_LIMIT`, `FAN_SPEED` |
 | `[CPU, KEY]` | `LOAD`, `FREQ`, `TEMP`, `POWER` |
 | `[RAM, KEY]` | `USED`, `TOTAL`, `SWAP_USED` |
-| `KEY` | `ENGINE_NAME`, `FPS`, `FRAMETIME`, `FRAMETIMES` |
+| `KEY` | `ENGINE_NAME`, `GPU_NAME`, `VULKAN_DRIVER`, `RESOLUTION`, `FPS`, `FRAMETIME`, `FRAMETIMES` |
+
+Some single-name references are backed by small shell commands:
+
+| Reference | Description |
+| --- | --- |
+| `ARCH` | Client executable architecture, using the Wine/Proton game executable when possible. |
+| `CLIENT_EXE` | Client executable name. |
+| `CPU_GOVERNOR` | Current CPU frequency governor. |
+| `CPU_NAME` | CPU model name. |
+| `DESKTOP_SESSION` | Current desktop session from `XDG_CURRENT_DESKTOP`. |
+| `GAMEMODE` | `ON` when GameMode appears in the client process maps, otherwise `OFF`. |
+| `KERNEL` | Kernel release. |
+| `MEDIA_ALBUM` | Current MPRIS media album from `playerctl`. |
+| `MEDIA_ARTIST` | Current MPRIS media artist from `playerctl`. |
+| `MEDIA_TITLE` | Current MPRIS media title from `playerctl`. |
+| `OS_NAME` | Pretty OS name from `/etc/os-release`. |
+| `VKBASALT` | `ON` when vkBasalt appears in the client process maps, otherwise `OFF`. |
+| `WINESYNC` | Wine sync method, such as `NTsync`, `Fsync`, `Esync`, `Wserver`, or `NONE`. |
+| `WINE_VERSION` | Wine or Proton version for Wine/Proton clients. |
 
 ## Example
 

@@ -21,9 +21,19 @@ struct MetricRef {
     std::string b;
 };
 
+enum class CellAlign {
+    Default,
+    Left,
+    Center,
+    Right,
+};
+
 struct CellStyle {
     float font_size = 0.0f;
     float font_scale = 1.0f;
+    int colspan = 1;
+    int truncate = 0;
+    CellAlign align = CellAlign::Default;
 };
 
 struct TextCell {
@@ -38,6 +48,7 @@ struct TextCell {
 struct ValueCell {
     MetricRef ref;
     std::string unit;
+    bool unit_override = false;
     std::string color;
     int precision = 0;
     CellStyle style;
@@ -54,6 +65,27 @@ struct GraphCell {
     CellStyle style;
 };
 
+using ProgressBound = std::variant<float, MetricRef>;
+
+struct ProgressCell {
+    MetricRef ref;
+    ProgressBound min = 0.0f;
+    ProgressBound max = 100.0f;
+    float value = 0.0f;
+    float min_value = 0.0f;
+    float max_value = 100.0f;
+    std::string text;
+    std::string layout_text;
+    std::string unit;
+    bool unit_override = false;
+    std::string color;
+    std::string background_color;
+    ImVec4 vec;
+    ImVec4 background_vec;
+    int precision = 1;
+    CellStyle style;
+};
+
 struct ExecCell {
     std::string command;
     std::string unit;
@@ -61,18 +93,29 @@ struct ExecCell {
     CellStyle style;
 };
 
+struct SeparatorCell {
+    std::string color;
+    ImVec4 vec;
+    float thickness = 1.0f;
+    CellStyle style;
+};
+
 struct hudTable;
 
 struct TableCell {
     std::shared_ptr<hudTable> table;
+    CellStyle style;
 };
 
-using Cell = std::variant<TextCell, ValueCell, GraphCell, ExecCell, TableCell>;
+using Cell = std::variant<TextCell, ValueCell, GraphCell, ProgressCell, ExecCell, SeparatorCell, TableCell>;
 using MaybeCell = std::optional<Cell>;
 
 struct hudTable {
     int cols = 0;
     int font_size = 24;
+    float col_gap = 8.0f;
+    float row_gap = -2.0f;
+    bool debug_cell_boxes = false;
     std::vector<std::vector<MaybeCell>> rows;
 };
 

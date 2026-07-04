@@ -219,7 +219,7 @@ hud_table:
         {value: [RAM, TEMP]}
     ]
 
-    - [ {text: VULKAN, color: "eb5b5b"},
+    - [ {value: ENGINE_NAME, color: "eb5b5b"},
         {value: FPS},
         {value: FRAMETIME}
     ]

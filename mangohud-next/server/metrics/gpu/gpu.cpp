@@ -7,6 +7,7 @@
 #include "amdgpu/amdgpu.hpp"
 #include "nvidia/nvidia.hpp"
 #include "panfrost.hpp"
+#include "panthor.hpp"
 #include "msm/dpu.hpp"
 #include "msm/kgsl.hpp"
 #include "../common/helpers.hpp"
@@ -94,6 +95,8 @@ GPUS::GPUS() {
             }
         } else if (driver == "panfrost") {
             gpu = std::make_shared<Panfrost>(drm_node, pci_dev, vendor_id, device_id);
+        } else if (driver == "panthor") {
+            gpu = std::make_shared<Panthor>(drm_node, pci_dev, vendor_id, device_id);
         } else if (driver == "msm_dpu") {
             gpu = std::make_shared<MSM_DPU>(drm_node, pci_dev, vendor_id, device_id);
         } else if (driver == "msm_drm") {
@@ -106,8 +109,6 @@ GPUS::GPUS() {
             std::lock_guard lock(available_gpus_m);
             available_gpus.push_back(gpu);
         }
-        gpu->start_thread_worker();
-
         // if (params->gpu_list.size() == 1 && params->gpu_list[0] == idx++)
         //     gpu->is_active = true;
 
@@ -288,9 +289,7 @@ int GPU::renderer() const {
 }
 
 GPU::~GPU() {
-    stop_thread = true;
-    if (worker_thread.joinable())
-        worker_thread.join();
+    stop_polling();
 }
 
 void GPU::add_pid(pid_t pid) {
@@ -372,4 +371,41 @@ void GPU::start_thread_worker() {
         );
 
     pthread_setname_np(worker_thread.native_handle(), worker_thread_name.c_str());
+}
+
+void GPU::request_polling() {
+    std::lock_guard lock(worker_mutex);
+    last_poll_request = std::chrono::steady_clock::now();
+    if (worker_thread.joinable())
+        return;
+
+    stop_thread = false;
+    start_thread_worker();
+}
+
+void GPU::stop_polling() {
+    std::lock_guard lock(worker_mutex);
+    if (!worker_thread.joinable())
+        return;
+
+    stop_thread = true;
+    worker_thread.join();
+}
+
+void GPU::stop_polling_if_idle(std::chrono::steady_clock::time_point now,
+                               std::chrono::nanoseconds idle_timeout) {
+    std::lock_guard lock(worker_mutex);
+    if (!worker_thread.joinable())
+        return;
+
+    if (now - last_poll_request < idle_timeout)
+        return;
+
+    stop_thread = true;
+    worker_thread.join();
+}
+
+bool GPU::polling_active() const {
+    std::lock_guard lock(worker_mutex);
+    return worker_thread.joinable();
 }

@@ -9,6 +9,7 @@
 #include "string_utils.h"
 
 static constexpr const char* default_cell_color = "FFFFFFFF";
+static constexpr const char* default_progress_background_color = "303030FF";
 
 static bool validate_table(const YAML::Node& table) {
     if (!table) {
@@ -144,6 +145,62 @@ static MetricRef parse_value(const YAML::Node& v) {
     throw std::runtime_error("value must be scalar or sequence");
 }
 
+static ProgressBound parse_progress_bound(const YAML::Node& v, float fallback) {
+    if (!v)
+        return fallback;
+
+    if (v.IsScalar()) {
+        try {
+            return v.as<float>();
+        } catch (const YAML::BadConversion&) {
+            return parse_value(v);
+        }
+    }
+
+    return parse_value(v);
+}
+
+static void parse_unit(const YAML::Node& cell, std::string& unit, bool& unit_override) {
+    const YAML::Node value = cell["unit"];
+    if (!value)
+        return;
+
+    if (value.IsScalar() && value.Tag() != "!") {
+        try {
+            if (value.as<bool>()) {
+                unit_override = false;
+                unit.clear();
+            } else {
+                unit_override = true;
+                unit.clear();
+            }
+            return;
+        } catch (const YAML::BadConversion&) {
+        }
+    }
+
+    unit = value.as<std::string>();
+    unit_override = true;
+}
+
+static CellAlign parse_cell_align(const YAML::Node& cell) {
+    if (!cell["align"])
+        return CellAlign::Default;
+
+    std::string align = cell["align"].as<std::string>();
+    if (align == "left")
+        return CellAlign::Left;
+
+    if (align == "center")
+        return CellAlign::Center;
+
+    if (align == "right")
+        return CellAlign::Right;
+
+    SPDLOG_ERROR("invalid cell align '{}': expected left, center, or right", align);
+    return CellAlign::Default;
+}
+
 static CellStyle parse_cell_style(const YAML::Node& cell) {
     CellStyle style;
 
@@ -153,7 +210,20 @@ static CellStyle parse_cell_style(const YAML::Node& cell) {
     if (cell["font_scale"])
         style.font_scale = cell["font_scale"].as<float>();
 
+    if (cell["colspan"])
+        style.colspan = std::max(1, cell["colspan"].as<int>());
+
+    if (cell["truncate"])
+        style.truncate = std::max(0, cell["truncate"].as<int>());
+
+    style.align = parse_cell_align(cell);
+
     return style;
+}
+
+static void append_colspan_placeholders(std::vector<MaybeCell>& row, const CellStyle& style) {
+    for (int i = 1; i < style.colspan; i++)
+        row.push_back(std::nullopt);
 }
 
 static bool parse_table_node(hudTable& table, YAML::Node table_node, int font_size) {
@@ -162,12 +232,41 @@ static bool parse_table_node(hudTable& table, YAML::Node table_node, int font_si
     table.font_size = font_size;
     std::size_t cols = 0;
     for (auto row : rows) {
-        cols = std::max(cols, row.size());
         std::vector<MaybeCell> parsed_row;
 
         for (auto cell : row) {
             if (cell.IsNull()) {
                 parsed_row.push_back(std::nullopt);
+                continue;
+            }
+
+            if (cell["separator"]) {
+                SeparatorCell sc;
+                sc.color = cell["color"] ? cell["color"].as<std::string>() : default_cell_color;
+                if (cell["thickness"])
+                    sc.thickness = std::max(1.0f, cell["thickness"].as<float>());
+                sc.style = parse_cell_style(cell);
+
+                parsed_row.push_back(Cell{sc});
+                append_colspan_placeholders(parsed_row, sc.style);
+                continue;
+            }
+
+            if (cell["progress"]) {
+                ProgressCell pc;
+                pc.ref = parse_value(cell["progress"]);
+                pc.min = parse_progress_bound(cell["min"], 0.0f);
+                pc.max = parse_progress_bound(cell["max"], 100.0f);
+                parse_unit(cell, pc.unit, pc.unit_override);
+                pc.text = cell["text"] ? cell["text"].as<std::string>() : std::string();
+                pc.color = cell["color"] ? cell["color"].as<std::string>() : default_cell_color;
+                pc.background_color = cell["background_color"] ? cell["background_color"].as<std::string>() : default_progress_background_color;
+                if (cell["precision"])
+                    try_stoi(pc.precision, cell["precision"].as<std::string>());
+                pc.style = parse_cell_style(cell);
+
+                parsed_row.push_back(Cell{pc});
+                append_colspan_placeholders(parsed_row, pc.style);
                 continue;
             }
 
@@ -178,19 +277,21 @@ static bool parse_table_node(hudTable& table, YAML::Node table_node, int font_si
                 tc.style = parse_cell_style(cell);
 
                 parsed_row.push_back(Cell{tc});
+                append_colspan_placeholders(parsed_row, tc.style);
                 continue;
             };
 
             if (cell["value"]) {
                 ValueCell vc;
                 vc.ref = parse_value(cell["value"]);
-                vc.unit = cell["unit"] ? cell["unit"].as<std::string>() : std::string();
+                parse_unit(cell, vc.unit, vc.unit_override);
                 vc.color = cell["color"] ? cell["color"].as<std::string>() : default_cell_color;
                 if (cell["precision"])
                     try_stoi(vc.precision, cell["precision"].as<std::string>());
                 vc.style = parse_cell_style(cell);
 
                 parsed_row.push_back(Cell{vc});
+                append_colspan_placeholders(parsed_row, vc.style);
                 continue;
             }
 
@@ -199,6 +300,7 @@ static bool parse_table_node(hudTable& table, YAML::Node table_node, int font_si
                 gc.ref = parse_value(cell["graph"]);
                 gc.style = parse_cell_style(cell);
                 parsed_row.push_back(Cell{gc});
+                append_colspan_placeholders(parsed_row, gc.style);
                 continue;
             }
 
@@ -210,22 +312,32 @@ static bool parse_table_node(hudTable& table, YAML::Node table_node, int font_si
                 ec.style = parse_cell_style(cell);
 
                 parsed_row.push_back(Cell{ec});
+                append_colspan_placeholders(parsed_row, ec.style);
                 continue;
             }
 
             if (cell["table"]) {
                 TableCell tc;
                 tc.table = std::make_shared<hudTable>();
+                tc.style = parse_cell_style(cell);
                 parse_table_node(*tc.table, cell["table"], font_size);
                 parsed_row.push_back(Cell{tc});
+                append_colspan_placeholders(parsed_row, tc.style);
                 continue;
             }
         }
 
+        cols = std::max(cols, parsed_row.size());
         table.rows.push_back(parsed_row);
     }
 
     table.cols = cols;
+    if (table_node["col_gap"])
+        table.col_gap = std::max(0.0f, table_node["col_gap"].as<float>());
+    if (table_node["row_gap"])
+        table.row_gap = table_node["row_gap"].as<float>();
+    if (table_node["debug_cell_boxes"])
+        table.debug_cell_boxes = table_node["debug_cell_boxes"].as<bool>();
     return true;
 }
 
